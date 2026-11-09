@@ -1,0 +1,36 @@
+{
+    "left_stick": {
+        "sensitivity": 1.25,
+        "anti_deadzone": 0.1,
+        "outer_deadzone": 0.92,
+        "curve_type": "linear",
+        "curve_exponent": 1.0
+    },
+    "right_stick": {
+        "sensitivity": 1.55,
+        "anti_deadzone": 0.15,
+        "outer_deadzone": 0.85,
+        "curve_type": "snappy",
+        "curve_exponent": 0.65
+    },
+    "button_mappings": {
+        "A": "A",
+        "B": "B",
+        "X": "X",
+        "Y": "Y",
+        "LB": "LB",
+        "RB": "RB",
+        "LT": "LT",
+        "RT": "RT",
+        "L3": "L3",
+        "R3": "R3",
+        "BACK": "BACK",
+        "START": "START",
+        "DPAD_UP": "DPAD_UP",
+        "DPAD_DOWN": "DPAD_DOWN",
+        "DPAD_LEFT": "DPAD_LEFT",
+        "DPAD_RIGHT": "DPAD_RIGHT"
+    },
+    "overlay_enabled": true,
+    "active_profile": "Competitive Deker"
+}
