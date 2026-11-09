@@ -1,11 +1,11 @@
-# 🏒 RinkStick Pro
+
 ### Advanced Stick Sensitivity & Button Remapping Engine for RinkSide (NHL Legacy PC)
 
 **RinkStick Pro** is a dedicated third-party input companion designed specifically for **RinkSide's native PC port of NHL Legacy (Xbox 360)**. It gives you complete mastery over your controller's analog stick sensitivity, anti-deadzones, early saturation, response curves, and full controller button/trigger remapping without modifying game files on disk or interfering with your RinkSide account.
 
 ---
 
-## ⚡ Key Features
+
 
 ### 1. Right Stick (SkillStick / Shooting / Puckhandling) Tuning
 - **Sensitivity Multiplier (1.0x – 3.0x)**: Drastically increases stick deflection speed so you reach maximum toe-drag angle, puck extension, and quick-release snapshots with a fraction of physical stick travel.
