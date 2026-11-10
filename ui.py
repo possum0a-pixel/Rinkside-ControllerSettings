@@ -291,14 +291,14 @@ class RinkStickUI:
         # Row 2: Anti-Deadzone
         r2 = tk.Frame(parent, bg=BG_CARD)
         r2.pack(fill=tk.X, pady=6)
-        tk.Label(r2, text="Anti-Deadzone (Slop Kill):", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=24, anchor="w").pack(side=tk.LEFT)
+        tk.Label(r2, text="Anti-Deadzone:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=24, anchor="w").pack(side=tk.LEFT)
         scale_anti = tk.Scale(r2, from_=0, to=35, resolution=1, orient=tk.HORIZONTAL, variable=anti_var, bg=BG_CARD, fg=TEXT_WHITE, highlightthickness=0, command=self._on_slider_change)
         scale_anti.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         
         # Row 3: Early Saturation / Outer Deadzone
         r3 = tk.Frame(parent, bg=BG_CARD)
         r3.pack(fill=tk.X, pady=6)
-        tk.Label(r3, text="Outer Deadzone (Early Max):", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=24, anchor="w").pack(side=tk.LEFT)
+        tk.Label(r3, text="Outer Deadzone:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=24, anchor="w").pack(side=tk.LEFT)
         scale_outer = tk.Scale(r3, from_=70, to=100, resolution=1, orient=tk.HORIZONTAL, variable=outer_var, bg=BG_CARD, fg=TEXT_WHITE, highlightthickness=0, command=self._on_slider_change)
         scale_outer.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
         
