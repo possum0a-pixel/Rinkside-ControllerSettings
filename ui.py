@@ -308,7 +308,8 @@ class RinkStickUI:
         tk.Label(r4, text="Response Curve Preset:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=24, anchor="w").pack(side=tk.LEFT)
         combo = ttk.Combobox(r4, values=["snappy", "linear", "exponential", "s_curve"], textvariable=curve_var, state="readonly", width=18)
         combo.pack(side=tk.LEFT, padx=8)
-        combo.bind("<<ComboboxSelected>>", lambda e: self._on_slider_change())
+        combo.bind("<<ComboboxSelected>>", lambda e, c=combo: [self._on_slider_change(), c.selection_clear(), self.root.focus_set()])
+        combo.bind("<FocusOut>", lambda e, c=combo: c.selection_clear())
 
         # Explanatory Info Card
         info_card = tk.Frame(parent, bg=BG_INPUT, padx=12, pady=10)
@@ -356,6 +357,7 @@ class RinkStickUI:
         cb_preset = ttk.Combobox(preset_box, values=list(REMAP_PRESETS.keys()), textvariable=self.remap_preset_var, state="readonly", width=22)
         cb_preset.pack(side=tk.LEFT)
         cb_preset.bind("<<ComboboxSelected>>", lambda e: [self._apply_remap_preset(self.remap_preset_var.get()), cb_preset.selection_clear(), self.root.focus_set()])
+        cb_preset.bind("<FocusOut>", lambda e: cb_preset.selection_clear())
 
         # Two columns for buttons (8 per column)
         columns_frame = tk.Frame(parent, bg=BG_CARD)
