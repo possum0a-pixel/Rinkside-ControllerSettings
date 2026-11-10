@@ -8,17 +8,17 @@
 
 
 ### 1. Right Stick (SkillStick / Shooting / Puckhandling) Tuning
-- **Sensitivity Multiplier (1.0x – 3.0x)**: Drastically increases stick deflection speed so you reach maximum toe-drag angle, puck extension, and quick-release snapshots with a fraction of physical stick travel.
-- **Anti-Deadzone (Slop Eliminator)**: Bypasses the game's internal deadzone floor (0%–35%). Subtle thumb movements immediately translate into on-ice puck movement.
-- **Outer Deadzone / Early Saturation (70%–100%)**: Triggers 100% stick output before the physical stick hits the outer rim, preventing thumb fatigue and missed shot releases.
+- **Sensitivity Multiplier (1.0x – 3.0x)
+- **Anti-Deadzone: Bypasses the game's internal deadzone floor (0%–35%). 
+- **Outer Deadzone / Early Saturation (70%–100%)**
 - **Custom Response Curves**:
-  - **Snappy Flick (Recommended)**: Aggressive sub-linear power curve for instant puck twitches and lightning wrist shots.
+  - **Snappy Flick (Recommended)**: Aggressive sub-linear power curve 
   - **Linear (1:1)**: Standard direct response.
   - **Exponential**: Fine-precision center control with explosive outer deflection.
   - **S-Curve**: Smooth center glide, fast mid-range action, clean saturation.
 
 ### 2. Left Stick (Skating & Movement) Tuning
-- Independent sensitivity multiplier, anti-deadzone, and response curves for tighter edge-work, quicker pivots, and agile breakout skating.
+- Independent sensitivity multiplier, anti-deadzone, and response curves 
 
 ### 3. Controller Button & Trigger Remapping
 - **Full 16-Input Remapper**: Remap any physical button or analog trigger to an alternative in-game output:
