@@ -3,7 +3,7 @@
 **RinkStick Pro** is a dedicated third-party input companion designed specifically for **RinkSide's native PC port of NHL Legacy (Xbox 360)**. It gives you complete mastery over your controller's analog stick sensitivity, anti-deadzones, early saturation, response curves, and full controller button/trigger remapping without modifying game files on disk or interfering with your RinkSide account.
 
 ---
-**IMPORTANT**: SOMETIMES WHILE USING THIRD PARTY INPUT SOFTWARE SUCH AS BETTERJOY OR STEAM INPUT (for non Steam applications), BOTH THE THIRD PARTY AND RAW INPUTS ARE REGISTERED BY RINKSIDE. TO FIX THIS ENABLE THE "MUTE PLAYER 2" OPTION. 
+**IMPORTANT**: SOMETIMES WHILE USING THIRD PARTY INPUT SOFTWARE SUCH AS BETTERJOY OR STEAM INPUT (for non Steam applications), BOTH THE THIRD PARTY AND RAW INPUTS ARE REGISTERED BY RINKSIDE. TO FIX THIS ENABLE THE "MUTE PLAYER 2" OPTION IN RINKSTICK. 
 ### 1. Right Stick
 - **Sensitivity Multiplier (1.0x – 3.0x)**: 
 - **Anti-Deadzone (Slop Eliminator)**: Bypasses the game's internal deadzone floor (0%–35%). 
