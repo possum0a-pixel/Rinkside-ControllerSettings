@@ -60,6 +60,7 @@ class AppConfig:
     button_mappings: Dict[str, str] = field(default_factory=lambda: {b: b for b in BUTTON_NAMES})
     overlay_enabled: bool = True
     active_profile: str = "Competitive Deker"
+    controller_type: str = "auto"  # "auto", "xinput", "ps4", "ps5", "switch", "generic"
 
 PRESETS = {
     "Competitive Deker": {
@@ -103,6 +104,7 @@ def load_config() -> AppConfig:
             cfg.button_mappings = base
         cfg.overlay_enabled = data.get("overlay_enabled", True)
         cfg.active_profile = data.get("active_profile", "Competitive Deker")
+        cfg.controller_type = data.get("controller_type", "auto")
         return cfg
     except Exception as e:
         print(f"[RinkStick] Error loading config: {e}. Using defaults.")
@@ -117,6 +119,7 @@ def save_config(config: AppConfig):
             "button_mappings": config.button_mappings,
             "overlay_enabled": config.overlay_enabled,
             "active_profile": config.active_profile,
+            "controller_type": config.controller_type,
         }
         with open(CONFIG_FILE_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4)

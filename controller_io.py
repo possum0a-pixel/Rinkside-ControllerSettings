@@ -15,6 +15,7 @@ from typing import Optional, Any, Dict, Tuple
 from config import AppConfig, BUTTON_NAMES
 from sensitivity import apply_stick_transformation
 from game_hook import GameInputBridge
+from dinput_manager import DirectInputPad
 
 try:
     import vgamepad as vg
@@ -136,6 +137,7 @@ class ControllerIO:
         # Connection status
         self.connected = False
         self.controller_index = 0
+        self.controller_backend: str = ""   # "xinput" | "dinput" | ""
         self.vpad_active = False
         self.vpad: Optional[Any] = None
         self.hook = GameInputBridge()
@@ -189,6 +191,10 @@ class ControllerIO:
             except Exception:
                 continue
 
+        # DirectInput fallback for non-XInput controllers
+        self.dinput = DirectInputPad()
+        self._dinput_idx: Optional[int] = None
+
     def _init_virtual_gamepad(self):
         """Creates the virtual Xbox 360 controller via ViGEmBus (opt-in only)."""
         if not HAS_VGAMEPAD:
@@ -232,42 +238,88 @@ class ControllerIO:
 
     def _loop(self):
         """High-frequency polling & transformation loop (150Hz = 6.6ms interval)."""
+        # COM must be initialized on this specific background thread for xinput1_4.dll
+        try:
+            ctypes.windll.ole32.CoInitialize(None)
+        except Exception:
+            pass
+
         xstate = XINPUT_STATE()
+        # DirectInput scan counter — only rescan every ~150 frames (~1 second)
+        _dinput_scan_countdown = 0
         
         while self._running:
             t0 = time.perf_counter()
-            
-            now = time.perf_counter()
-            self.hook.try_attach(now)
-            self.hook_active = self.hook.hooked
 
-            # Poll physical controller
+            # 1. Game hook attach / lifecycle (independent of physical controller polling)
+            try:
+                now = time.perf_counter()
+                self.hook.try_attach(now)
+                self.hook_active = self.hook.hooked
+            except Exception:
+                self.hook_active = False
+
+            # 2. Poll physical controller
             found_controller = False
-            if self.xinput:
-                occupied = []
-                for idx in range(4):
-                    res = self.xinput.XInputGetState(idx, ctypes.byref(xstate))
-                    if res == 0:
-                        occupied.append(idx)
-                if occupied:
-                    pick = occupied[-1] if len(occupied) > 1 else occupied[0]
-                    if self.xinput.XInputGetState(pick, ctypes.byref(xstate)) == 0:
-                        self.controller_index = pick
-                        found_controller = True
-                        
+            raw_lx = raw_ly = raw_rx = raw_ry = buttons = lt = rt = 0
+
+            # -- XInput path (Xbox / XInput-compatible pads) --
+            try:
+                if self.xinput and self.config.controller_type in ("auto", "xinput"):
+                    occupied = []
+                    for idx in range(4):
+                        res = self.xinput.XInputGetState(idx, ctypes.byref(xstate))
+                        if res == 0:
+                            occupied.append(idx)
+                    if occupied:
+                        pick = occupied[-1] if len(occupied) > 1 else occupied[0]
+                        if self.xinput.XInputGetState(pick, ctypes.byref(xstate)) == 0:
+                            self.controller_index = pick
+                            self.controller_backend = "xinput"
+                            found_controller = True
+                            gp = xstate.Gamepad
+                            raw_lx = gp.sThumbLX
+                            raw_ly = gp.sThumbLY
+                            raw_rx = gp.sThumbRX
+                            raw_ry = gp.sThumbRY
+                            buttons = gp.wButtons
+                            lt = gp.bLeftTrigger
+                            rt = gp.bRightTrigger
+            except Exception:
+                pass
+
+            # -- DirectInput fallback (PS4/PS5/Switch/generic) --
+            # Activated when: XInput found nothing, OR user forced a non-xinput type
+            if not found_controller and self.config.controller_type != "xinput":
+                try:
+                    _dinput_scan_countdown -= 1
+                    # Rescan for device periodically, or if we lost one
+                    if _dinput_scan_countdown <= 0 or self._dinput_idx is None:
+                        self._dinput_idx = self.dinput.scan(self.config.controller_type)
+                        _dinput_scan_countdown = 150  # rescan every ~1 s
+
+                    if self._dinput_idx is not None:
+                        state = self.dinput.poll(self._dinput_idx, self.config.controller_type)
+                        if state is not None:
+                            raw_lx   = state.lx
+                            raw_ly   = state.ly
+                            raw_rx   = state.rx
+                            raw_ry   = state.ry
+                            buttons  = state.buttons
+                            lt       = state.lt
+                            rt       = state.rt
+                            # Use index 10+ to distinguish from XInput slots 0-3
+                            self.controller_index = 10 + self._dinput_idx
+                            self.controller_backend = "dinput"
+                            found_controller = True
+                        else:
+                            # Device vanished — force rescan next tick
+                            self._dinput_idx = None
+                            _dinput_scan_countdown = 0
+                except Exception:
+                    pass
+
             self.connected = found_controller
-            
-            if found_controller:
-                gp = xstate.Gamepad
-                raw_lx = gp.sThumbLX
-                raw_ly = gp.sThumbLY
-                raw_rx = gp.sThumbRX
-                raw_ry = gp.sThumbRY
-                buttons = gp.wButtons
-                lt = gp.bLeftTrigger
-                rt = gp.bRightTrigger
-            else:
-                raw_lx = raw_ly = raw_rx = raw_ry = buttons = lt = rt = 0
 
             # Store raw states
             self.raw_lx = raw_lx
@@ -283,11 +335,16 @@ class ControllerIO:
             self.norm_raw_rx = raw_rx / 32767.0
             self.norm_raw_ry = raw_ry / 32767.0
 
-            # Apply sensitivity transformations & button remappings
-            with self._lock:
-                out_lx, out_ly, n_lx, n_ly = apply_stick_transformation(raw_lx, raw_ly, self.config.left_stick)
-                out_rx, out_ry, n_rx, n_ry = apply_stick_transformation(raw_rx, raw_ry, self.config.right_stick)
-                out_buttons, out_lt, out_rt = apply_button_remapping(buttons, lt, rt, self.config.button_mappings)
+            # 3. Apply sensitivity transformations & button remappings
+            try:
+                with self._lock:
+                    out_lx, out_ly, n_lx, n_ly = apply_stick_transformation(raw_lx, raw_ly, self.config.left_stick)
+                    out_rx, out_ry, n_rx, n_ry = apply_stick_transformation(raw_rx, raw_ry, self.config.right_stick)
+                    out_buttons, out_lt, out_rt = apply_button_remapping(buttons, lt, rt, self.config.button_mappings)
+            except Exception:
+                out_lx, out_ly, n_lx, n_ly = raw_lx, raw_ly, self.norm_raw_lx, self.norm_raw_ly
+                out_rx, out_ry, n_rx, n_ry = raw_rx, raw_ry, self.norm_raw_rx, self.norm_raw_ry
+                out_buttons, out_lt, out_rt = buttons, lt, rt
 
             self.out_lx = out_lx
             self.out_ly = out_ly
@@ -302,10 +359,13 @@ class ControllerIO:
             self.norm_out_rx = n_rx
             self.norm_out_ry = n_ry
 
-            # Write boosted analog sticks & remapped buttons onto Player 1 pad in RAM
-            self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt)
+            # 4. Stream to in-game hook
+            try:
+                self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt)
+            except Exception:
+                pass
 
-            # Optional ViGEm path (disabled by default)
+            # 5. Optional ViGEm path (disabled by default)
             if self.vpad and self.vpad_active:
                 try:
                     self.vpad.left_joystick_float(x_value_float=n_lx, y_value_float=n_ly)
@@ -326,3 +386,8 @@ class ControllerIO:
             sleep_time = 0.0065 - elapsed
             if sleep_time > 0:
                 time.sleep(sleep_time)
+
+        try:
+            ctypes.windll.ole32.CoUninitialize()
+        except Exception:
+            pass

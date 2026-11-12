@@ -1,21 +1,21 @@
 """
 RinkStick In-Memory Hook Engine for NHL Legacy (rexruntime.dll).
 
-Definitive single-point hook on InputSystem::GetState (RVA 0x368dd0).
+Definitive dynamic single-point hook on InputSystem::GetState.
 
 In rexruntime.dll (the Xbox 360 runtime for NHL Legacy), all controller drivers
 (SDL, XInput, DirectInput) report to InputSystem::GetState. The drivers' inputs
 are accumulated together (buttons bitwise-OR'd, triggers maxed, sticks blended).
 
-At RVA 0x368dd0, InputSystem::GetState performs the FINAL write of the aggregated
+At the end of InputSystem::GetState, it performs the FINAL write of the aggregated
 X_INPUT_STATE structure to the caller's output buffer (rcx) before returning:
-    0x368dd0: movl %ebp, (%rcx)        ; dwPacketNumber
-    0x368dd2: movl 0x2c(%rsp), %edx    ; accumulated wButtons
-    0x368dd6: movw %dx, 0x4(%rcx)      ; write wButtons
-    0x368dda: movb %r13b, 0x6(%rcx)    ; write bLeftTrigger
-    0x368dde: movb %bl, 0x7(%rcx)      ; write bRightTrigger
-    0x368de1: vmovq %xmm7, 0x8(%rcx)   ; write sticks (lx, ly, rx, ry)
-    0x368de6: jmp 0x180368ded          ; jump to epilogue
+    movl %ebp, (%rcx)        ; dwPacketNumber
+    movl 0x2c(%rsp), %edx    ; accumulated wButtons
+    movw %dx, 0x4(%rcx)      ; write wButtons
+    movb %r13b, 0x6(%rcx)    ; write bLeftTrigger
+    movb %bl, 0x7(%rcx)      ; write bRightTrigger
+    vmovq %xmm7, 0x8(%rcx)   ; write sticks (lx, ly, rx, ry)
+    jmp <epilogue>           ; jump to epilogue
 
 By placing an inline hook at this exact 24-byte write site:
   1. We intercept the FINAL output for Player 1 (user_index == 0 in edi).
@@ -25,15 +25,20 @@ By placing an inline hook at this exact 24-byte write site:
   5. No earlier driver or OR-accumulation can bypass or un-remap our inputs.
   6. Non-Player 1 slots (user_index != 0) pass through unmodified.
   7. Physical controller stays on input0 so the RinkSide account attaches.
+
+Auto-adaptation:
+  Offsets are dynamically discovered via PE export parsing and signature scanning
+  so future RinkSide updates never cause crashes due to hardcoded addresses.
 """
 
 from __future__ import annotations
 
 import ctypes
+import os
 import struct
 import time
 from ctypes import wintypes
-from typing import Optional
+from typing import Optional, Tuple
 
 # ── Win32 Constants ──────────────────────────────────────────────────────────
 PROCESS_ALL_ACCESS       = 0x1F0FFF
@@ -49,6 +54,8 @@ TH32CS_SNAPPROCESS       = 0x00000002
 TH32CS_SNAPMODULE        = 0x00000008
 TH32CS_SNAPMODULE32      = 0x00000010
 INVALID_HANDLE_VALUE     = ctypes.c_void_p(-1).value
+STILL_ACTIVE             = 259
+DONT_RESOLVE_DLL_REFERENCES = 0x00000001
 
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
@@ -85,6 +92,19 @@ kernel32.WriteProcessMemory.argtypes = [
 
 kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+
+kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+
+kernel32.LoadLibraryExW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p, ctypes.c_uint32]
+kernel32.LoadLibraryExW.restype = ctypes.c_void_p
+
+kernel32.GetProcAddress.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+kernel32.GetProcAddress.restype = ctypes.c_void_p
+
+kernel32.FreeLibrary.argtypes = [ctypes.c_void_p]
+kernel32.FreeLibrary.restype = wintypes.BOOL
+
 
 class PROCESSENTRY32W(ctypes.Structure):
     _fields_ = [
@@ -128,22 +148,57 @@ SHARED_BLOCK_FMT  = "<IIhhhhHBB"
 SHARED_BLOCK_SIZE = struct.calcsize(SHARED_BLOCK_FMT)   # 20 bytes
 MAGIC             = 0x4B4E4952
 
-# ── Target RVA in rexruntime.dll ─────────────────────────────────────────────
-# Location inside InputSystem::GetState where the final X_INPUT_STATE is written
-RVA_INPUT_SYSTEM_WRITE = 0x368dd0
-RVA_INPUT_SYSTEM_RESUME = 0x368ded
 HOOK_SITE_SIZE = 24
 
-# Original 24 bytes at rexruntime.dll + 0x368dd0:
-ORIG_SITE_BYTES = bytes([
+# Unique instruction signature at the write site inside InputSystem::GetState:
+# mov [rcx], ebp; mov edx, [rsp+0x2c]; mov [rcx+4], dx; mov [rcx+6], r13b; mov [rcx+7], bl
+WRITE_SITE_SIG = bytes([
     0x89, 0x29,                         # mov [rcx], ebp
-    0x8b, 0x54, 0x24, 0x2c,             # mov edx, [rsp+0x2c]
+    0x8B, 0x54, 0x24, 0x2C,             # mov edx, [rsp+0x2c]
     0x66, 0x89, 0x51, 0x04,             # mov [rcx+0x04], dx
     0x44, 0x88, 0x69, 0x06,             # mov [rcx+0x06], r13b
-    0x88, 0x59, 0x07,                   # mov [rcx+0x07], bl
-    0xc5, 0xf9, 0xd6, 0x79, 0x08,       # vmovq [rcx+0x08], xmm7
-    0xeb, 0x05                          # jmp 0x5 (to 0x368ded)
+    0x88, 0x59, 0x07                    # mov [rcx+0x07], bl
 ])
+
+# Fallback offsets for current RinkSide build (Nov 10+ 2026 update)
+DEFAULT_WRITE_RVA = 0x368e80
+DEFAULT_RESUME_RVA = 0x368e9d
+
+_OFFSETS_CACHE: dict[str, Tuple[int, int]] = {}
+
+
+def resolve_rex_offsets(dll_path: str) -> Optional[Tuple[int, int]]:
+    """
+    Dynamically discovers the write site and resume site RVAs from rexruntime.dll.
+    Ensures compatibility across game and runtime updates.
+    """
+    if not dll_path or not os.path.exists(dll_path):
+        return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+    if dll_path in _OFFSETS_CACHE:
+        return _OFFSETS_CACHE[dll_path]
+    try:
+        h = kernel32.LoadLibraryExW(dll_path, None, DONT_RESOLVE_DLL_REFERENCES)
+        if not h:
+            return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+        try:
+            sym = b"?GetState@InputSystem@input@rex@@QEAAIIPEAUX_INPUT_STATE@23@@Z"
+            fn = kernel32.GetProcAddress(h, sym)
+            if not fn:
+                return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+            func_rva = fn - h
+            buf = (ctypes.c_ubyte * 0x300).from_address(fn)
+            func_bytes = bytes(buf)
+            pos = func_bytes.find(WRITE_SITE_SIG)
+            if pos != -1:
+                write_rva = func_rva + pos
+                resume_rva = write_rva + 29
+                _OFFSETS_CACHE[dll_path] = (write_rva, resume_rva)
+                return write_rva, resume_rva
+        finally:
+            kernel32.FreeLibrary(h)
+    except Exception:
+        pass
+    return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
 
 
 class GameHook:
@@ -152,12 +207,23 @@ class GameHook:
         self.pid:                Optional[int] = None
         self.hProcess:           Optional[int] = None
         self.rexruntime_base:    int           = 0
+        self.rexruntime_path:    str           = ""
         self.allocated_page:     int           = 0
         self.shared_block_addr:  int           = 0
         self.hook_code_addr:     int           = 0
         self.target_write_va:    int           = 0
         self.target_resume_va:   int           = 0
+        self.orig_site_bytes:    bytes         = b""
         self.status_message:     str           = "Waiting for nhllegacy.exe..."
+
+    def is_process_alive(self) -> bool:
+        """Checks if the hooked game process is still actively running."""
+        if not self.hProcess:
+            return False
+        exit_code = wintypes.DWORD(0)
+        if not kernel32.GetExitCodeProcess(self.hProcess, ctypes.byref(exit_code)):
+            return False
+        return exit_code.value == STILL_ACTIVE
 
     def find_nhllegacy_pid(self) -> Optional[int]:
         snapshot = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
@@ -176,21 +242,22 @@ class GameHook:
         finally:
             kernel32.CloseHandle(snapshot)
 
-    def find_module_base(self, pid: int, module_name: str) -> int:
+    def find_module_info(self, pid: int, module_name: str) -> Tuple[int, str]:
+        """Finds the base address and executable path of a module in the target process."""
         snap = kernel32.CreateToolhelp32Snapshot(
             TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)
         if snap == INVALID_HANDLE_VALUE:
-            return 0
+            return 0, ""
         entry = MODULEENTRY32W()
         entry.dwSize = ctypes.sizeof(MODULEENTRY32W)
         try:
             if not kernel32.Module32FirstW(snap, ctypes.byref(entry)):
-                return 0
+                return 0, ""
             while True:
                 if entry.szModule.lower() == module_name.lower():
-                    return entry.modBaseAddr
+                    return entry.modBaseAddr, entry.szExePath
                 if not kernel32.Module32NextW(snap, ctypes.byref(entry)):
-                    return 0
+                    return 0, ""
         finally:
             kernel32.CloseHandle(snap)
 
@@ -303,15 +370,19 @@ class GameHook:
         return bytes(b)
 
     def attach(self) -> bool:
-        """Finds nhllegacy.exe, allocates an RWX page, and patches InputSystem::GetState."""
+        """Finds nhllegacy.exe, allocates an RWX page, and safely patches InputSystem::GetState."""
         pid = self.find_nhllegacy_pid()
         if not pid:
-            self.hooked = False
+            if self.hooked:
+                self.detach()
             self.status_message = "Waiting for nhllegacy.exe to launch..."
             return False
 
         if self.hooked and self.pid == pid:
-            return True
+            if self.is_process_alive():
+                return True
+            # Process died; reset state to reattach cleanly
+            self.detach()
 
         self.pid = pid
         hProcess = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
@@ -324,18 +395,26 @@ class GameHook:
             return False
         self.hProcess = hProcess
 
-        rex_base = self.find_module_base(pid, "rexruntime.dll")
+        rex_base, rex_path = self.find_module_info(pid, "rexruntime.dll")
         if not rex_base:
             self.status_message = "Found nhllegacy.exe, waiting for rexruntime.dll..."
             kernel32.CloseHandle(hProcess)
             self.hProcess = None
             return False
         self.rexruntime_base = rex_base
+        self.rexruntime_path = rex_path
 
-        self.target_write_va = rex_base + RVA_INPUT_SYSTEM_WRITE
-        self.target_resume_va = rex_base + RVA_INPUT_SYSTEM_RESUME
+        # ── Dynamically resolve write site RVAs ───────────────────────────────
+        offsets = resolve_rex_offsets(rex_path)
+        if offsets:
+            write_rva, resume_rva = offsets
+        else:
+            write_rva, resume_rva = DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
 
-        # Verify current bytes at target location to make sure we're hooking the right code
+        self.target_write_va = rex_base + write_rva
+        self.target_resume_va = rex_base + resume_rva
+
+        # ── Read and verify current bytes at target location ──────────────────
         current_bytes = (ctypes.c_ubyte * HOOK_SITE_SIZE)()
         read_sz = ctypes.c_size_t(0)
         if not kernel32.ReadProcessMemory(hProcess, self.target_write_va,
@@ -346,7 +425,18 @@ class GameHook:
             self.hProcess = None
             return False
 
-        # Allocate RWX page in game process
+        current_bytes_data = bytes(current_bytes)
+        # Safety check: ensure memory begins with the write site signature
+        if not current_bytes_data.startswith(WRITE_SITE_SIG):
+            self.status_message = "Signature mismatch at hook target. Aborting to prevent crash."
+            print(f"[RinkStick Hook] Target bytes mismatch at 0x{self.target_write_va:X}: {current_bytes_data[:10].hex()}")
+            kernel32.CloseHandle(hProcess)
+            self.hProcess = None
+            return False
+
+        self.orig_site_bytes = current_bytes_data
+
+        # ── Allocate RWX page in game process ─────────────────────────────────
         PAGE_SIZE = 4096
         page = kernel32.VirtualAllocEx(hProcess, 0, PAGE_SIZE,
                                        MEM_COMMIT | MEM_RESERVE,
@@ -396,7 +486,7 @@ class GameHook:
 
         self.hooked = True
         self.status_message = f"🟢 ATTACHED & ACTIVE (NHL Legacy PID: {pid})"
-        print(f"[RinkStick Hook] Successfully attached to NHL Legacy (PID {pid})!")
+        print(f"[RinkStick Hook] Successfully attached to NHL Legacy (PID {pid}) at 0x{self.target_write_va:X}!")
         return True
 
     def update_state(self, lx: int, ly: int, rx: int, ry: int,
@@ -420,17 +510,18 @@ class GameHook:
     def detach(self) -> None:
         """Restores original 24 bytes in InputSystem::GetState and frees allocated page."""
         if not self.hProcess:
+            self.hooked = False
             return
         old_prot = wintypes.DWORD(0)
         written  = ctypes.c_size_t(0)
 
         # Restore original instructions
-        if self.target_write_va:
+        if self.target_write_va and self.orig_site_bytes:
             kernel32.VirtualProtectEx(self.hProcess, self.target_write_va,
                                       HOOK_SITE_SIZE, PAGE_EXECUTE_READWRITE,
                                       ctypes.byref(old_prot))
             kernel32.WriteProcessMemory(self.hProcess, self.target_write_va,
-                                        ORIG_SITE_BYTES, HOOK_SITE_SIZE,
+                                        self.orig_site_bytes, HOOK_SITE_SIZE,
                                         ctypes.byref(written))
             kernel32.VirtualProtectEx(self.hProcess, self.target_write_va,
                                       HOOK_SITE_SIZE, old_prot,
@@ -462,6 +553,9 @@ class GameInputBridge:
 
     def try_attach(self, now: float, interval_s: float = 1.0) -> bool:
         if self.hooked:
+            if not self._hook.is_process_alive():
+                self._hook.detach()
+                return False
             return True
         if (now - self._last_attach_try) < interval_s:
             return False
@@ -475,7 +569,10 @@ class GameInputBridge:
     def push_pad_state(self, lx: int, ly: int, rx: int, ry: int,
                        buttons: int, lt: int, rt: int) -> None:
         if self.hooked:
-            self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt)
+            try:
+                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt)
+            except Exception:
+                pass
 
     def detach(self) -> None:
         try:

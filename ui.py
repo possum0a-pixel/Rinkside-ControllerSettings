@@ -13,6 +13,18 @@ from config import AppConfig, StickSettings, PRESETS, REMAP_PRESETS, BUTTON_NAME
 from controller_io import ControllerIO, XINPUT_BUTTON_MASKS
 from game_detector import GameDetector
 
+CONTROLLER_TYPE_OPTIONS = [
+    ("Auto-Detect",      "auto"),
+    ("Xbox / XInput",    "xinput"),
+    ("PlayStation 4",    "ps4"),
+    ("PlayStation 5",    "ps5"),
+    ("Switch Pro",       "switch"),
+    ("Generic / Other",  "generic"),
+]
+# Display label → config value
+_CTYPE_LABEL_TO_VAL = {label: val for label, val in CONTROLLER_TYPE_OPTIONS}
+_CTYPE_VAL_TO_LABEL = {val: label for label, val in CONTROLLER_TYPE_OPTIONS}
+
 # Color Palette (Dark Ice / Cyber Hockey)
 BG_MAIN       = "#0f172a"  # Slate 900
 BG_CARD       = "#1e293b"  # Slate 800
@@ -119,6 +131,10 @@ class RinkStickUI:
         self.status_game_var = tk.StringVar(value="Searching for NHL Legacy...")
         self.status_vpad_var = tk.StringVar(value="HOOK: WAITING FOR GAME...")
         self.status_ctrl_var = tk.StringVar(value="Connecting...")
+        
+        # Controller type selector variable
+        init_ctype_label = _CTYPE_VAL_TO_LABEL.get(config.controller_type, "Auto-Detect")
+        self.controller_type_var = tk.StringVar(value=init_ctype_label)
         
         # Button remap UI widgets
         self.remap_vars: Dict[str, tk.StringVar] = {}
@@ -248,6 +264,34 @@ class RinkStickUI:
                 cursor="hand2"
             )
             btn.pack(fill=tk.X, pady=3)
+
+        # ---- Controller Type selector -----------------------------------
+        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(14, 10))
+
+        lbl_ctype = tk.Label(left_box, text="CONTROLLER TYPE", font=("Segoe UI", 10, "bold"), fg=TEXT_WHITE, bg=BG_CARD)
+        lbl_ctype.pack(anchor="w", pady=(0, 6))
+
+        ctype_labels = [label for label, _ in CONTROLLER_TYPE_OPTIONS]
+        cb_ctype = ttk.Combobox(
+            left_box,
+            values=ctype_labels,
+            textvariable=self.controller_type_var,
+            state="readonly",
+            width=20
+        )
+        cb_ctype.pack(fill=tk.X, pady=(0, 4))
+        cb_ctype.bind("<<ComboboxSelected>>",
+                      lambda e, c=cb_ctype: self._on_controller_type_change(c))
+        cb_ctype.bind("<FocusOut>", lambda e, c=cb_ctype: c.selection_clear())
+
+        tk.Label(
+            left_box,
+            text="Choose your pad type for correct\nbutton & axis mapping.",
+            font=("Segoe UI", 8),
+            fg=TEXT_MUTED,
+            bg=BG_CARD,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 6))
 
         # Right Side: Notebook with Tabs
         right_box = tk.Frame(container, bg=BG_MAIN)
@@ -470,6 +514,17 @@ class RinkStickUI:
         self.config.left_stick.curve_type = self.ls_curve_var.get()
         save_config(self.config)
 
+    def _on_controller_type_change(self, cb):
+        label = self.controller_type_var.get()
+        val = _CTYPE_LABEL_TO_VAL.get(label, "auto")
+        self.config.controller_type = val
+        # Reset DirectInput device cache so the new type is re-scanned immediately
+        if hasattr(self.controller, "_dinput_idx"):
+            self.controller._dinput_idx = None
+        save_config(self.config)
+        cb.selection_clear()
+        self.root.focus_set()
+
     def _apply_preset(self, preset_name: str):
         if preset_name not in PRESETS:
             return
@@ -534,7 +589,15 @@ class RinkStickUI:
 
         # Update Controller Badge
         if self.controller.connected:
-            self.status_ctrl_var.set(f"PAD: CONNECTED (Port {self.controller.controller_index})")
+            backend = getattr(self.controller, "controller_backend", "")
+            idx = self.controller.controller_index
+            if backend == "dinput":
+                # Show WinMM device index (subtract offset) and type
+                dinput_idx = idx - 10
+                ctype_label = _CTYPE_VAL_TO_LABEL.get(self.config.controller_type, "DirectInput")
+                self.status_ctrl_var.set(f"PAD: CONNECTED ({ctype_label}, Dev {dinput_idx})")
+            else:
+                self.status_ctrl_var.set(f"PAD: CONNECTED (Port {idx})")
             self.lbl_ctrl_badge.configure(bg=ACCENT_GREEN)
         else:
             self.status_ctrl_var.set("PAD: DISCONNECTED")
