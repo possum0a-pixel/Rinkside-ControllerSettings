@@ -134,7 +134,7 @@ class MODULEENTRY32W(ctypes.Structure):
         ("szExePath",     ctypes.c_wchar * 260),
     ]
 
-# ── Shared control block layout (20 bytes) ───────────────────────────────────
+# ── Shared control block layout (21 bytes) ───────────────────────────────────
 # +0x00 DWORD magic         0x4B4E4952 ("RINK")
 # +0x04 DWORD active        1 = enabled, 0 = bypass
 # +0x08 SHORT lx            Transformed Left Stick X (-32767..32767)
@@ -144,8 +144,9 @@ class MODULEENTRY32W(ctypes.Structure):
 # +0x10 WORD  wButtons      Remapped digital buttons bitmask
 # +0x12 BYTE  bLeftTrigger  Remapped Left Trigger (0..255)
 # +0x13 BYTE  bRightTrigger Remapped Right Trigger (0..255)
-SHARED_BLOCK_FMT  = "<IIhhhhHBB"
-SHARED_BLOCK_SIZE = struct.calcsize(SHARED_BLOCK_FMT)   # 20 bytes
+# +0x14 BYTE  mute_p2       1 = return ERROR_DEVICE_NOT_CONNECTED for edi!=0
+SHARED_BLOCK_FMT  = "<IIhhhhHBBB"
+SHARED_BLOCK_SIZE = struct.calcsize(SHARED_BLOCK_FMT)   # 21 bytes
 MAGIC             = 0x4B4E4952
 
 HOOK_SITE_SIZE = 24
@@ -282,7 +283,7 @@ class GameHook:
         # 2. Check if user_index == 0 (Player 1)
         b += bytes([0x85, 0xFF])                        # test edi, edi
         off_jnz_p1 = len(b)
-        b += bytes([0x75, 0x00])                        # jne write_orig
+        b += bytes([0x75, 0x00])                        # jne check_mute_p2
 
         # 3. Load shared block address and verify magic + active
         b += bytes([0x49, 0xBA])
@@ -344,7 +345,23 @@ class GameHook:
         off_jmp_exit = len(b)
         b += bytes([0xEB, 0x00])
 
-        # write_orig: write accumulated inputs verbatim (Player 2+ or hook disabled)
+        # check_mute_p2: reached when edi != 0 (Player 2+)
+        # Load shared block; if mute_p2 byte at [r10+0x14] is set, return
+        # ERROR_DEVICE_NOT_CONNECTED (0x48F) so the game sees no second pad.
+        # Otherwise fall through to write_orig (original behavior).
+        pos_check_mute = len(b)
+        b += bytes([0x49, 0xBA])
+        b += struct.pack("<Q", shared_addr)             # mov r10, <shared_addr>
+        b += bytes([0x41, 0x80, 0x7A, 0x14, 0x00])     # cmp byte ptr [r10+0x14], 0
+        off_jz_mute = len(b)
+        b += bytes([0x74, 0x00])                        # je write_orig (not muted)
+        # muted path: return ERROR_DEVICE_NOT_CONNECTED
+        b += bytes([0xB8, 0x8F, 0x04, 0x00, 0x00])     # mov eax, 0x0000048F
+        b += bytes([0x49, 0xBB])
+        b += struct.pack("<Q", resume_addr)             # mov r11, <resume_addr>
+        b += bytes([0x41, 0xFF, 0xE3])                  # jmp r11
+
+        # write_orig: write accumulated inputs verbatim (Player 2+ not muted, or hook disabled)
         pos_write_orig = len(b)
         b += bytes([
             0x8B, 0x54, 0x24, 0x2C,                     # mov edx, [rsp+0x2c]
@@ -362,10 +379,11 @@ class GameHook:
         b += bytes([0x41, 0xFF, 0xE3])                  # jmp r11
 
         # Fix up relative jumps
-        b[off_jnz_p1 + 1] = pos_write_orig - (off_jnz_p1 + 2)
+        b[off_jnz_p1 + 1] = pos_check_mute - (off_jnz_p1 + 2)
         b[off_jnz_magic + 1] = pos_write_orig - (off_jnz_magic + 2)
         b[off_jz_active + 1] = pos_write_orig - (off_jz_active + 2)
         b[off_jmp_exit + 1] = pos_exit - (off_jmp_exit + 2)
+        b[off_jz_mute + 1] = pos_write_orig - (off_jz_mute + 2)
 
         return bytes(b)
 
@@ -454,8 +472,8 @@ class GameHook:
 
         written = ctypes.c_size_t(0)
 
-        # 1. Write initial shared block (active=1)
-        initial_block = struct.pack(SHARED_BLOCK_FMT, MAGIC, 1, 0, 0, 0, 0, 0, 0, 0)
+        # 1. Write initial shared block (active=1, mute_p2=0)
+        initial_block = struct.pack(SHARED_BLOCK_FMT, MAGIC, 1, 0, 0, 0, 0, 0, 0, 0, 0)
         kernel32.WriteProcessMemory(hProcess, self.shared_block_addr,
                                     initial_block, len(initial_block),
                                     ctypes.byref(written))
@@ -490,7 +508,7 @@ class GameHook:
         return True
 
     def update_state(self, lx: int, ly: int, rx: int, ry: int,
-                     buttons: int, lt: int, rt: int, active: int = 1) -> None:
+                     buttons: int, lt: int, rt: int, active: int = 1, mute_p2: int = 0) -> None:
         """Writes transformed stick + remapped button/trigger data into shared control block."""
         if not self.hooked or not self.hProcess:
             return
@@ -499,7 +517,8 @@ class GameHook:
             MAGIC, int(active),
             int(lx), int(ly), int(rx), int(ry),
             int(buttons) & 0xFFFF,
-            int(lt) & 0xFF, int(rt) & 0xFF
+            int(lt) & 0xFF, int(rt) & 0xFF,
+            int(mute_p2) & 0xFF,
         )
         written = ctypes.c_size_t(0)
         kernel32.WriteProcessMemory(self.hProcess,
@@ -567,10 +586,10 @@ class GameInputBridge:
             return False
 
     def push_pad_state(self, lx: int, ly: int, rx: int, ry: int,
-                       buttons: int, lt: int, rt: int, active: int = 1) -> None:
+                       buttons: int, lt: int, rt: int, active: int = 1, mute_p2: int = 0) -> None:
         if self.hooked:
             try:
-                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt, active=active)
+                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt, active=active, mute_p2=mute_p2)
             except Exception:
                 pass
 

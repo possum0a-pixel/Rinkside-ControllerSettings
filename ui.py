@@ -136,6 +136,9 @@ class RinkStickUI:
         init_ctype_label = _CTYPE_VAL_TO_LABEL.get(config.controller_type, "Auto-Detect")
         self.controller_type_var = tk.StringVar(value=init_ctype_label)
         
+        # Mute Player 2 toggle variable
+        self.mute_p2_var = tk.BooleanVar(value=config.mute_player2)
+        
         # Button remap UI widgets
         self.remap_vars: Dict[str, tk.StringVar] = {}
         self.remap_labels: Dict[str, tk.Label] = {}
@@ -287,6 +290,35 @@ class RinkStickUI:
         tk.Label(
             left_box,
             text="Choose your pad type for correct\nbutton & axis mapping.",
+            font=("Segoe UI", 8),
+            fg=TEXT_MUTED,
+            bg=BG_CARD,
+            justify=tk.LEFT,
+        ).pack(anchor="w", pady=(0, 6))
+
+        # ---- Mute Player 2 toggle -------------------------------------------
+        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(10, 10))
+
+        mute_cb = tk.Checkbutton(
+            left_box,
+            text="Mute Player 2\n(solves a potential ghost pad issue)",
+            variable=self.mute_p2_var,
+            command=self._on_mute_p2_change,
+            bg=BG_CARD,
+            fg=TEXT_WHITE,
+            activebackground=BG_CARD,
+            activeforeground=ACCENT_CYAN,
+            selectcolor=BG_INPUT,
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify=tk.LEFT,
+            wraplength=200,
+        )
+        mute_cb.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(
+            left_box,
+            text="Hides extra virtual controllers\n(Steam Input, BetterJoy, etc.)",
             font=("Segoe UI", 8),
             fg=TEXT_MUTED,
             bg=BG_CARD,
@@ -524,6 +556,10 @@ class RinkStickUI:
         save_config(self.config)
         cb.selection_clear()
         self.root.focus_set()
+
+    def _on_mute_p2_change(self):
+        self.config.mute_player2 = self.mute_p2_var.get()
+        save_config(self.config)
 
     def _apply_preset(self, preset_name: str):
         if preset_name not in PRESETS:

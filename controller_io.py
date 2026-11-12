@@ -272,7 +272,8 @@ class ControllerIO:
                         if res == 0:
                             occupied.append(idx)
                     if occupied:
-                        pick = occupied[-1] if len(occupied) > 1 else occupied[0]
+                        # Always bind to Player 1 (slot 0)
+                        pick = occupied[0]
                         if self.xinput.XInputGetState(pick, ctypes.byref(xstate)) == 0:
                             self.controller_index = pick
                             self.controller_backend = "xinput"
@@ -361,13 +362,13 @@ class ControllerIO:
 
             # 4. Stream to in-game hook (only override Player 1 when a pad is actually connected)
             try:
+                mute = 1 if self.config.mute_player2 else 0
                 if found_controller:
-                    self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt, active=1)
+                    self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt, active=1, mute_p2=mute)
                 else:
-                    self.hook.push_pad_state(0, 0, 0, 0, 0, 0, 0, active=0)
+                    self.hook.push_pad_state(0, 0, 0, 0, 0, 0, 0, active=0, mute_p2=mute)
             except Exception:
                 pass
-
             # 5. Optional ViGEm path (disabled by default)
             if self.vpad and self.vpad_active:
                 try:
