@@ -29,7 +29,8 @@
   - `Flipped Bumpers & Triggers (LB/LT & RB/RT)`: Popular competitive hockey layout.
   - `Swap Stick Clicks (L3 <-> R3)`: Swaps hustle sprint and shot fake click.
   - `Invert Face Buttons (A<->B, X<->Y)`: Inverts face buttons.
-
+**CONTROLLER RUMBLE SLIDER**
+-Mute or modify rumble intensity
 
 ### 4. Direct In-Memory Input Injection (Keeps Your RinkSide Account on Player 1)
 - **Direct Engine Injection**: When `nhllegacy.exe` runs, RinkStick attaches to the running process and writes transformed stick and remapped button values directly into ReXGlue's `SDLInputDriver::GetState` for the existing pad in RAM.
