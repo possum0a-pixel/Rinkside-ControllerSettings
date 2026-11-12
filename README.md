@@ -29,6 +29,7 @@
   - `Flipped Bumpers & Triggers (LB/LT & RB/RT)`: Popular competitive hockey layout.
   - `Swap Stick Clicks (L3 <-> R3)`: Swaps hustle sprint and shot fake click.
   - `Invert Face Buttons (A<->B, X<->Y)`: Inverts face buttons.
+
 **CONTROLLER RUMBLE SLIDER**
 -Mute or modify rumble intensity
 
