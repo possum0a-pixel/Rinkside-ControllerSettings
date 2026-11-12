@@ -3,7 +3,7 @@ RinkStick DirectInput / WinMM Controller Manager
 Provides non-XInput controller support (PS4, PS5, Switch Pro, generic HID gamepads)
 using Windows built-in winmm.dll + joyGetPosEx. No external dependencies required.
 
-Axis / button layout is auto-detected by controller type, with an optional override.
+Axis / button layout is auto-detected by controller type, with dynamic axis discovery.
 """
 
 import ctypes
@@ -39,12 +39,8 @@ JOYCAPS_HASPOV     = 0x0010
 JOYCAPS_POV4DIR    = 0x0020
 JOYCAPS_POVCTS     = 0x0040
 
-JOY_POVCENTERED = 0xFFFF          # 16-bit sentinel
-JOY_POVCENTERED_FULL = 0xFFFFFFFF  # 32-bit sentinel (joyGetPosEx)
-JOY_POVFORWARD  = 0
-JOY_POVRIGHT    = 9000
-JOY_POVBACKWARD = 18000
-JOY_POVLEFT     = 27000
+JOY_POVCENTERED = 0xFFFF
+JOY_POVCENTERED_FULL = 0xFFFFFFFF
 
 # ---------------------------------------------------------------------------
 # WinMM structures
@@ -119,10 +115,6 @@ XINPUT_MASK = {
 # ---------------------------------------------------------------------------
 # Per-controller button index → XInput button name mappings
 # ---------------------------------------------------------------------------
-# PS4 / PS5 — DualShock4 / DualSense in DirectInput mode (no DS4Windows)
-#   0=Square, 1=Cross, 2=Circle, 3=Triangle, 4=L1, 5=R1,
-#   6=L2(digital), 7=R2(digital), 8=Share/Create, 9=Options,
-#   10=L3, 11=R3, 12=PS, 13=Touchpad
 PS4_BUTTON_MAP = {
     0: "X",      # Square → X (face left)
     1: "A",      # Cross  → A (face bottom)
@@ -136,25 +128,11 @@ PS4_BUTTON_MAP = {
     11: "R3",
 }
 
-# Switch Pro Controller in DirectInput mode
-# Mapped physically to Xbox standard layout for intuitive hockey controls:
-#   0: South (B on Switch)  → A (Pass / Protect Puck)
-#   1: East  (A on Switch)  → B (Body Check / Slap Shot)
-#   2: West  (Y on Switch)  → X (Stick Lift / Poke)
-#   3: North (X on Switch)  → Y (Board Pin / Fight)
-#   4: L     → LB
-#   5: R     → RB
-#   6: ZL    → Digital trigger (handled in poll)
-#   7: ZR    → Digital trigger (handled in poll)
-#   8: Minus → BACK
-#   9: Plus  → START
-#   10: L3
-#   11: R3
 SWITCH_BUTTON_MAP = {
-    0: "A",      # South button → A
-    1: "B",      # East button  → B
-    2: "X",      # West button  → X
-    3: "Y",      # North button → Y
+    0: "A",      # South button (B on Switch) → A
+    1: "B",      # East button  (A on Switch) → B
+    2: "X",      # West button  (Y on Switch) → X
+    3: "Y",      # North button (X on Switch) → Y
     4: "LB",     # L
     5: "RB",     # R
     8: "BACK",   # Minus
@@ -163,7 +141,6 @@ SWITCH_BUTTON_MAP = {
     11: "R3",
 }
 
-# Generic / unknown — assume a common Xbox-like layout
 GENERIC_BUTTON_MAP = {
     0: "A",
     1: "B",
@@ -184,23 +161,6 @@ BUTTON_MAPS = {
     "generic": GENERIC_BUTTON_MAP,
     "xinput":  {},
     "auto":    GENERIC_BUTTON_MAP,
-}
-
-# ---------------------------------------------------------------------------
-# Axis assignments per controller type
-# Fields: lx, ly, rx, ry, lt, rt
-# Axis sources: "x"=dwXpos, "y"=dwYpos, "z"=dwZpos,
-#               "r"=dwRpos, "u"=dwUpos, "v"=dwVpos
-# ---------------------------------------------------------------------------
-AXIS_MAP = {
-    # PS4/PS5: LS=(X,Y), RS=(Z,Rpos), L2=Upos, R2=Vpos
-    "ps4":     {"lx": "x", "ly": "y", "rx": "z", "ry": "r", "lt": "u", "rt": "v"},
-    "ps5":     {"lx": "x", "ly": "y", "rx": "z", "ry": "r", "lt": "u", "rt": "v"},
-    # Switch Pro: LS=(X,Y), RS=(Z,Rpos), ZL/ZR are digital buttons 6 & 7
-    "switch":  {"lx": "x", "ly": "y", "rx": "z", "ry": "r", "lt": None, "rt": None},
-    # Generic fallback: LS=(X,Y), RS=(Z,Rpos)
-    "generic": {"lx": "x", "ly": "y", "rx": "z", "ry": "r", "lt": "u", "rt": "v"},
-    "auto":    {"lx": "x", "ly": "y", "rx": "z", "ry": "r", "lt": "u", "rt": "v"},
 }
 
 # ---------------------------------------------------------------------------
@@ -225,11 +185,16 @@ def _norm_axis(raw: int, min_val: int, max_val: int, invert: bool = False, deadz
     DirectInput drift, then smoothly rescales from deadzone to 100%.
     """
     if max_val <= min_val:
-        return 0
+        min_val = 0
+        max_val = 65535
+
     span = max_val - min_val
+    if span <= 0:
+        return 0
+
     centered = raw - min_val - span // 2
     frac = centered / (span / 2.0)
-    
+
     if invert:
         frac = -frac
 
@@ -239,7 +204,7 @@ def _norm_axis(raw: int, min_val: int, max_val: int, invert: bool = False, deadz
     # Center deadzone filter to kill neutral potentiometer noise
     if abs(frac) < deadzone:
         return 0
-    
+
     # Smooth rescaling past deadzone
     sign = 1.0 if frac > 0.0 else -1.0
     rescaled = sign * (abs(frac) - deadzone) / (1.0 - deadzone)
@@ -249,8 +214,11 @@ def _norm_axis(raw: int, min_val: int, max_val: int, invert: bool = False, deadz
 def _norm_trigger(raw: int, min_val: int, max_val: int, deadzone: float = 0.05) -> int:
     """Map a raw WinMM axis value to 0..255 with deadzone."""
     if max_val <= min_val:
-        return 0
+        min_val = 0
+        max_val = 65535
     span = max_val - min_val
+    if span <= 0:
+        return 0
     frac = (raw - min_val) / span
     frac = max(0.0, min(1.0, frac))
     if frac < deadzone:
@@ -267,7 +235,6 @@ def _pov_to_dpad(pov: int) -> int:
         return 0
     angle = pov % 36000
     flags = 0
-    # Up = 0 (also catches wrap-around 31500..36000 and 0..4500)
     if angle <= 4500 or angle >= 31500:
         flags |= XINPUT_MASK["DPAD_UP"]
     if 4500 <= angle <= 13500:
@@ -278,35 +245,24 @@ def _pov_to_dpad(pov: int) -> int:
         flags |= XINPUT_MASK["DPAD_LEFT"]
     return flags
 
-def _get_axis(info: JOYINFOEX, caps: JOYCAPSW, axis_key: Optional[str]) -> tuple:
-    """
-    Return (raw_value, min_val, max_val) for the requested axis key.
-    If the axis is missing or not supported by device caps, returns (32767, 0, 65535)
-    so it evaluates to neutral center (0), NEVER max deflection.
-    """
+def _get_axis_val(info: JOYINFOEX, caps: JOYCAPSW, axis_key: Optional[str]) -> tuple:
+    """Return (raw_value, min_val, max_val). Safe against uninitialized caps."""
     if not axis_key:
         return 32767, 0, 65535
-    if axis_key == "x":
-        return info.dwXpos, caps.wXmin, caps.wXmax
-    elif axis_key == "y":
-        return info.dwYpos, caps.wYmin, caps.wYmax
-    elif axis_key == "z":
-        if caps.wCaps & JOYCAPS_HASZ:
-            return info.dwZpos, caps.wZmin, caps.wZmax
-        return 32767, 0, 65535
-    elif axis_key == "r":
-        if caps.wCaps & JOYCAPS_HASR:
-            return info.dwRpos, caps.wRmin, caps.wRmax
-        return 32767, 0, 65535
-    elif axis_key == "u":
-        if caps.wCaps & JOYCAPS_HASU:
-            return info.dwUpos, caps.wUmin, caps.wUmax
-        return 32767, 0, 65535
-    elif axis_key == "v":
-        if caps.wCaps & JOYCAPS_HASV:
-            return info.dwVpos, caps.wVmin, caps.wVmax
-        return 32767, 0, 65535
-    return 32767, 0, 65535
+
+    attr_pos = "dw" + axis_key.upper() + "pos"
+    attr_min = "w" + axis_key.upper() + "min"
+    attr_max = "w" + axis_key.upper() + "max"
+
+    val = getattr(info, attr_pos, 32767)
+    min_v = getattr(caps, attr_min, 0)
+    max_v = getattr(caps, attr_max, 65535)
+
+    if max_v <= min_v:
+        min_v = 0
+        max_v = 65535
+
+    return val, min_v, max_v
 
 # ---------------------------------------------------------------------------
 # Main class
@@ -332,6 +288,8 @@ class DirectInputPad:
             self._available = False
 
         self._caps_cache: dict = {}
+        # Dynamic axis detection cache per device index: dev_idx -> (rs_x_key, rs_y_key)
+        self._rs_axis_map: dict = {}
 
     def _get_caps(self, dev_idx: int) -> Optional[JOYCAPSW]:
         if dev_idx in self._caps_cache:
@@ -364,6 +322,37 @@ class DirectInputPad:
                 return idx
         return None
 
+    def _resolve_rs_axes(self, dev_idx: int, info: JOYINFOEX, default_x: str, default_y: str) -> tuple:
+        """
+        Dynamically binds Right Stick X and Y to whichever physical axes sit near
+        neutral center (15,000 to 50,000) on initial detection.
+        Caches the result so it stays locked even when stick is pushed to 0.
+        """
+        if dev_idx in self._rs_axis_map:
+            return self._rs_axis_map[dev_idx]
+
+        candidates = ["z", "u", "r", "v"]
+        live = []
+        for c in candidates:
+            val = getattr(info, "dw" + c.upper() + "pos", 0)
+            # A real physical stick at rest sits near center (~32,767)
+            if 15000 <= val <= 50000:
+                live.append(c)
+
+        rx_key = default_x
+        ry_key = default_y
+
+        if len(live) >= 2:
+            rx_key = live[0]
+            ry_key = live[1]
+        elif len(live) == 1:
+            rx_key = live[0]
+            ry_key = "r" if rx_key != "r" else "v"
+
+        self._rs_axis_map[dev_idx] = (rx_key, ry_key)
+        print(f"[RinkStick/DInput] Device {dev_idx} bound Right Stick: X={rx_key.upper()}, Y={ry_key.upper()}")
+        return rx_key, ry_key
+
     def poll(self, dev_idx: int, controller_type: str = "auto") -> Optional[PadState]:
         """
         Poll device *dev_idx* and return a PadState normalized to XInput ranges.
@@ -375,6 +364,7 @@ class DirectInputPad:
         caps = self._get_caps(dev_idx)
         if caps is None:
             self._caps_cache.pop(dev_idx, None)
+            self._rs_axis_map.pop(dev_idx, None)
             return None
 
         info = JOYINFOEX()
@@ -382,58 +372,55 @@ class DirectInputPad:
         info.dwFlags = JOY_RETURNALL
         ret = self._winmm.joyGetPosEx(dev_idx, ctypes.byref(info))
         if ret != JOYERR_NOERROR:
+            self._rs_axis_map.pop(dev_idx, None)
             return None
 
-        # Pick axis / button layout
-        ctype = controller_type if controller_type in AXIS_MAP else "auto"
-        axis_cfg    = AXIS_MAP[ctype]
-        button_map  = BUTTON_MAPS.get(ctype, GENERIC_BUTTON_MAP)
+        ctype = controller_type if controller_type in BUTTON_MAPS else "auto"
+        button_map = BUTTON_MAPS.get(ctype, GENERIC_BUTTON_MAP)
 
-        # -- Sticks -------------------------------------------------------
-        # WinMM Y-axis: 0=top (up), max=bottom (down) — invert to match XInput
-        raw_lx, lx_min, lx_max = _get_axis(info, caps, axis_cfg["lx"])
-        raw_ly, ly_min, ly_max = _get_axis(info, caps, axis_cfg["ly"])
-        raw_rx, rx_min, rx_max = _get_axis(info, caps, axis_cfg["rx"])
-        raw_ry, ry_min, ry_max = _get_axis(info, caps, axis_cfg["ry"])
-
+        # -- Left Stick (standard across all controllers) -----------------
+        raw_lx, lx_min, lx_max = _get_axis_val(info, caps, "x")
+        raw_ly, ly_min, ly_max = _get_axis_val(info, caps, "y")
         lx = _norm_axis(raw_lx, lx_min, lx_max)
         ly = _norm_axis(raw_ly, ly_min, ly_max, invert=True)
+
+        # -- Right Stick (dynamically bound to active physical axes) -------
+        default_x = "u" if ctype == "switch" else "z"
+        default_y = "r"
+        rx_key, ry_key = self._resolve_rs_axes(dev_idx, info, default_x, default_y)
+
+        raw_rx, rx_min, rx_max = _get_axis_val(info, caps, rx_key)
+        raw_ry, ry_min, ry_max = _get_axis_val(info, caps, ry_key)
         rx = _norm_axis(raw_rx, rx_min, rx_max)
         ry = _norm_axis(raw_ry, ry_min, ry_max, invert=True)
 
         # -- Triggers -----------------------------------------------------
-        lt_key = axis_cfg.get("lt")
-        rt_key = axis_cfg.get("rt")
+        raw_btns = info.dwButtons
         lt = rt = 0
-        if lt_key:
-            raw_lt, t_min, t_max = _get_axis(info, caps, lt_key)
-            lt = _norm_trigger(raw_lt, t_min, t_max)
-        if rt_key:
-            raw_rt, t_min, t_max = _get_axis(info, caps, rt_key)
-            rt = _norm_trigger(raw_rt, t_min, t_max)
+
+        # PS4/PS5 analog triggers via U/V axes if present
+        if ctype in ("ps4", "ps5"):
+            raw_lt, t_min, t_max = _get_axis_val(info, caps, "u")
+            raw_rt, tr_min, tr_max = _get_axis_val(info, caps, "v")
+            if raw_lt > 1000:
+                lt = _norm_trigger(raw_lt, t_min, t_max)
+            if raw_rt > 1000:
+                rt = _norm_trigger(raw_rt, tr_min, tr_max)
+
+        # Digital triggers (Switch ZL=btn 6, ZR=btn 7; PS4 fallback L2=btn 6, R2=btn 7)
+        if raw_btns & (1 << 6):
+            lt = 255
+        if raw_btns & (1 << 7):
+            rt = 255
 
         # -- Buttons ------------------------------------------------------
-        raw_btns = info.dwButtons
         out_btns = 0
         for bit_idx, xinput_name in button_map.items():
             if raw_btns & (1 << bit_idx):
                 out_btns |= XINPUT_MASK.get(xinput_name, 0)
 
-        # Digital triggers for Switch and PS4/PS5 fallbacks
-        if ctype == "switch":
-            if raw_btns & (1 << 6):  # ZL
-                lt = 255
-            if raw_btns & (1 << 7):  # ZR
-                rt = 255
-        elif ctype in ("ps4", "ps5"):
-            if raw_btns & (1 << 6) and lt < 30:
-                lt = 255
-            if raw_btns & (1 << 7) and rt < 30:
-                rt = 255
-
         # -- D-pad (POV hat) ----------------------------------------------
-        if caps.wCaps & JOYCAPS_HASPOV:
-            out_btns |= _pov_to_dpad(info.dwPOV)
+        out_btns |= _pov_to_dpad(info.dwPOV)
 
         return PadState(lx=lx, ly=ly, rx=rx, ry=ry, lt=lt, rt=rt, buttons=out_btns)
 

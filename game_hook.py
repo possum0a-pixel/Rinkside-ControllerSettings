@@ -490,13 +490,13 @@ class GameHook:
         return True
 
     def update_state(self, lx: int, ly: int, rx: int, ry: int,
-                     buttons: int, lt: int, rt: int) -> None:
+                     buttons: int, lt: int, rt: int, active: int = 1) -> None:
         """Writes transformed stick + remapped button/trigger data into shared control block."""
         if not self.hooked or not self.hProcess:
             return
         block = struct.pack(
             SHARED_BLOCK_FMT,
-            MAGIC, 1,
+            MAGIC, int(active),
             int(lx), int(ly), int(rx), int(ry),
             int(buttons) & 0xFFFF,
             int(lt) & 0xFF, int(rt) & 0xFF
@@ -567,10 +567,10 @@ class GameInputBridge:
             return False
 
     def push_pad_state(self, lx: int, ly: int, rx: int, ry: int,
-                       buttons: int, lt: int, rt: int) -> None:
+                       buttons: int, lt: int, rt: int, active: int = 1) -> None:
         if self.hooked:
             try:
-                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt)
+                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt, active=active)
             except Exception:
                 pass
 

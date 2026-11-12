@@ -33,5 +33,5 @@
     },
     "overlay_enabled": true,
     "active_profile": "Competitive Deker",
-    "controller_type": "auto"
+    "controller_type": "switch"
 }

@@ -263,9 +263,9 @@ class ControllerIO:
             found_controller = False
             raw_lx = raw_ly = raw_rx = raw_ry = buttons = lt = rt = 0
 
-            # -- XInput path (Xbox / XInput-compatible pads) --
+            # -- XInput path (Primary: Xbox, Steam Input, BetterJoy, or adapters) --
             try:
-                if self.xinput and self.config.controller_type in ("auto", "xinput"):
+                if self.xinput:
                     occupied = []
                     for idx in range(4):
                         res = self.xinput.XInputGetState(idx, ctypes.byref(xstate))
@@ -288,9 +288,9 @@ class ControllerIO:
             except Exception:
                 pass
 
-            # -- DirectInput fallback (PS4/PS5/Switch/generic) --
-            # Activated when: XInput found nothing, OR user forced a non-xinput type
-            if not found_controller and self.config.controller_type != "xinput":
+            # -- DirectInput fallback (Non-XInput: Raw PS4/PS5/Switch/generic pads) --
+            # Automatically activates whenever XInput finds no connected controller
+            if not found_controller:
                 try:
                     _dinput_scan_countdown -= 1
                     # Rescan for device periodically, or if we lost one
@@ -359,9 +359,12 @@ class ControllerIO:
             self.norm_out_rx = n_rx
             self.norm_out_ry = n_ry
 
-            # 4. Stream to in-game hook
+            # 4. Stream to in-game hook (only override Player 1 when a pad is actually connected)
             try:
-                self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt)
+                if found_controller:
+                    self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt, active=1)
+                else:
+                    self.hook.push_pad_state(0, 0, 0, 0, 0, 0, 0, active=0)
             except Exception:
                 pass
 
