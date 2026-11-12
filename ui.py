@@ -138,6 +138,10 @@ class RinkStickUI:
         
         # Mute Player 2 toggle variable
         self.mute_p2_var = tk.BooleanVar(value=config.mute_player2)
+
+        # Controller rumble intensity variable (0..100)
+        self.rumble_var = tk.IntVar(value=getattr(config, "rumble_intensity", 100))
+        self.lbl_rumble_status: Optional[tk.Label] = None
         
         # Button remap UI widgets
         self.remap_vars: Dict[str, tk.StringVar] = {}
@@ -224,31 +228,31 @@ class RinkStickUI:
         container.pack(fill=tk.BOTH, expand=True)
         
         # Left Side: Real-time Telemetry Radars & Preset Profiles
-        left_box = tk.Frame(container, bg=BG_CARD, width=330, padx=14, pady=14)
+        left_box = tk.Frame(container, bg=BG_CARD, width=330, padx=14, pady=10)
         left_box.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 12))
         
         lbl_radar_sec = tk.Label(left_box, text="REAL-TIME STICK TELEMETRY", font=("Segoe UI", 10, "bold"), fg=TEXT_WHITE, bg=BG_CARD)
-        lbl_radar_sec.pack(anchor="w", pady=(0, 10))
+        lbl_radar_sec.pack(anchor="w", pady=(0, 6))
         
         # Radars row: Left Stick on left, Right Stick on right
         radars_frame = tk.Frame(left_box, bg=BG_CARD)
-        radars_frame.pack(fill=tk.X, pady=(0, 10))
+        radars_frame.pack(fill=tk.X, pady=(0, 6))
         
-        self.radar_ls = StickRadar(radars_frame, title="LEFT STICK (Skating)", size=142)
+        self.radar_ls = StickRadar(radars_frame, title="LEFT STICK (Skating)", size=136)
         self.radar_ls.pack(side=tk.LEFT, padx=3)
         
-        self.radar_rs = StickRadar(radars_frame, title="RIGHT STICK (SkillStick)", size=142)
+        self.radar_rs = StickRadar(radars_frame, title="RIGHT STICK (SkillStick)", size=136)
         self.radar_rs.pack(side=tk.RIGHT, padx=3)
         
         # Legend
         legend = tk.Frame(left_box, bg=BG_CARD)
-        legend.pack(fill=tk.X, pady=(0, 16))
+        legend.pack(fill=tk.X, pady=(0, 8))
         tk.Label(legend, text="● Cyan = Boosted Output", fg=ACCENT_CYAN, bg=BG_CARD, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=4)
         tk.Label(legend, text="○ Gray = Physical Input", fg=TEXT_MUTED, bg=BG_CARD, font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=4)
         
         # Presets selector
         lbl_presets = tk.Label(left_box, text="PRESET PROFILES", font=("Segoe UI", 10, "bold"), fg=TEXT_WHITE, bg=BG_CARD)
-        lbl_presets.pack(anchor="w", pady=(5, 8))
+        lbl_presets.pack(anchor="w", pady=(2, 4))
         
         for name in PRESETS.keys():
             btn = tk.Button(
@@ -263,16 +267,16 @@ class RinkStickUI:
                 relief=tk.FLAT,
                 anchor="w",
                 padx=12,
-                pady=6,
+                pady=3,
                 cursor="hand2"
             )
-            btn.pack(fill=tk.X, pady=3)
+            btn.pack(fill=tk.X, pady=2)
 
         # ---- Controller Type selector -----------------------------------
-        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(14, 10))
+        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(8, 6))
 
         lbl_ctype = tk.Label(left_box, text="CONTROLLER TYPE", font=("Segoe UI", 10, "bold"), fg=TEXT_WHITE, bg=BG_CARD)
-        lbl_ctype.pack(anchor="w", pady=(0, 6))
+        lbl_ctype.pack(anchor="w", pady=(0, 4))
 
         ctype_labels = [label for label, _ in CONTROLLER_TYPE_OPTIONS]
         cb_ctype = ttk.Combobox(
@@ -282,7 +286,7 @@ class RinkStickUI:
             state="readonly",
             width=20
         )
-        cb_ctype.pack(fill=tk.X, pady=(0, 4))
+        cb_ctype.pack(fill=tk.X, pady=(0, 2))
         cb_ctype.bind("<<ComboboxSelected>>",
                       lambda e, c=cb_ctype: self._on_controller_type_change(c))
         cb_ctype.bind("<FocusOut>", lambda e, c=cb_ctype: c.selection_clear())
@@ -294,10 +298,10 @@ class RinkStickUI:
             fg=TEXT_MUTED,
             bg=BG_CARD,
             justify=tk.LEFT,
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(anchor="w", pady=(0, 4))
 
         # ---- Mute Player 2 toggle -------------------------------------------
-        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(10, 10))
+        tk.Frame(left_box, bg="#334155", height=1).pack(fill=tk.X, pady=(8, 6))
 
         mute_cb = tk.Checkbutton(
             left_box,
@@ -314,7 +318,7 @@ class RinkStickUI:
             justify=tk.LEFT,
             wraplength=200,
         )
-        mute_cb.pack(fill=tk.X, pady=(0, 4))
+        mute_cb.pack(fill=tk.X, pady=(0, 2))
 
         tk.Label(
             left_box,
@@ -323,7 +327,7 @@ class RinkStickUI:
             fg=TEXT_MUTED,
             bg=BG_CARD,
             justify=tk.LEFT,
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(anchor="w", pady=(0, 4))
 
         # Right Side: Notebook with Tabs
         right_box = tk.Frame(container, bg=BG_MAIN)
@@ -346,6 +350,11 @@ class RinkStickUI:
         tab_remap = tk.Frame(nb, bg=BG_CARD, padx=18, pady=14)
         nb.add(tab_remap, text="🎮 Button Remapping")
         self._build_remap_tab(tab_remap)
+
+        # Tab 4: Controller Rumble & Haptics
+        tab_rumble = tk.Frame(nb, bg=BG_CARD, padx=18, pady=14)
+        nb.add(tab_rumble, text="📳 Controller Rumble")
+        self._build_rumble_tab(tab_rumble)
 
     def _build_stick_tab(self, parent: tk.Frame, stick_prefix: str, description: str):
         is_rs = (stick_prefix == "rs")
@@ -520,6 +529,126 @@ class RinkStickUI:
                 if k in self.remap_vars:
                     self.remap_vars[k].set(v)
             save_config(self.config)
+
+    def _build_rumble_tab(self, parent: tk.Frame):
+        """Builds the controller rumble intensity slider, presets, and test pulse section."""
+        top_bar = tk.Frame(parent, bg=BG_CARD)
+        top_bar.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(top_bar, text="CONTROLLER RUMBLE & HAPTIC FEEDBACK", font=("Segoe UI", 10, "bold"), fg=ACCENT_CYAN, bg=BG_CARD).pack(anchor="w")
+        tk.Label(top_bar, text="Scale in-game hit, collision, and shot vibration strength, or disable rumble entirely.", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=BG_CARD).pack(anchor="w")
+
+        # Row 1: Rumble Intensity Slider
+        r1 = tk.Frame(parent, bg=BG_CARD)
+        r1.pack(fill=tk.X, pady=(10, 2))
+        tk.Label(r1, text="Rumble Intensity:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=22, anchor="w").pack(side=tk.LEFT)
+        scale_rumble = tk.Scale(
+            r1,
+            from_=0,
+            to=100,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            variable=self.rumble_var,
+            bg=BG_CARD,
+            fg=TEXT_WHITE,
+            highlightthickness=0,
+            command=self._on_rumble_change
+        )
+        scale_rumble.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+
+        # Status text below slider
+        self.lbl_rumble_status = tk.Label(
+            parent,
+            text=self._get_rumble_status_text(self.rumble_var.get()),
+            font=("Segoe UI", 8, "italic"),
+            fg=ACCENT_CYAN,
+            bg=BG_CARD,
+            anchor="w"
+        )
+        self.lbl_rumble_status.pack(fill=tk.X, padx=(160, 0), pady=(0, 14))
+
+        # Row 2: Quick Presets
+        r2 = tk.Frame(parent, bg=BG_CARD)
+        r2.pack(fill=tk.X, pady=6)
+        tk.Label(r2, text="Quick Presets:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=22, anchor="w").pack(side=tk.LEFT)
+
+        presets_box = tk.Frame(r2, bg=BG_CARD)
+        presets_box.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=8)
+        for label, val in [("Mute (0%)", 0), ("Soft (35%)", 35), ("Balanced (70%)", 70), ("Full (100%)", 100)]:
+            tk.Button(
+                presets_box,
+                text=label,
+                command=lambda v=val: self._set_rumble_val(v),
+                bg="#e2e8f0",
+                fg="#000000",
+                activebackground=ACCENT_BLUE,
+                activeforeground="#ffffff",
+                font=("Segoe UI", 8, "bold"),
+                relief=tk.FLAT,
+                padx=10,
+                pady=4,
+                cursor="hand2"
+            ).pack(side=tk.LEFT, padx=3)
+
+        # Row 3: Test Rumble Pulse Button
+        r3 = tk.Frame(parent, bg=BG_CARD)
+        r3.pack(fill=tk.X, pady=(14, 6))
+        tk.Label(r3, text="Test Haptics:", font=("Segoe UI", 9, "bold"), fg=TEXT_WHITE, bg=BG_CARD, width=22, anchor="w").pack(side=tk.LEFT)
+        btn_test = tk.Button(
+            r3,
+            text="⚡ Test Rumble (250ms Pulse)",
+            command=self._on_test_rumble,
+            bg=ACCENT_BLUE,
+            fg=TEXT_WHITE,
+            activebackground=ACCENT_CYAN,
+            activeforeground="#000000",
+            font=("Segoe UI", 9, "bold"),
+            relief=tk.FLAT,
+            padx=14,
+            pady=6,
+            cursor="hand2"
+        )
+        btn_test.pack(side=tk.LEFT, padx=8)
+        tk.Label(r3, text="Fires a short vibration pulse on your active controller.", font=("Segoe UI", 8), fg=TEXT_MUTED, bg=BG_CARD).pack(side=tk.LEFT, padx=6)
+
+        # Explanatory Info Card
+        info_card = tk.Frame(parent, bg=BG_INPUT, padx=14, pady=12)
+        info_card.pack(fill=tk.X, pady=(20, 0))
+
+        rumble_info = (
+            "• Scaled in RAM: Motor speeds are scaled dynamically during game execution; game files remain untouched.\n"
+            "• Complete Silence: Set to 0% to completely mute high-impact vibration for quiet gameplay.\n"
+            "• Universal Support: Compatible with Switch Pro, PlayStation 4/5, Xbox 360/One/Series, and Steam Input."
+        )
+        tk.Label(info_card, text=rumble_info, font=("Segoe UI", 8), fg=TEXT_WHITE, bg=BG_INPUT, justify=tk.LEFT, anchor="w").pack(anchor="w")
+
+    def _get_rumble_status_text(self, val: int) -> str:
+        if val <= 0:
+            return "0% — Silent (All controller vibration disabled)"
+        elif val < 40:
+            return f"{val}% — Subtle (Gentle haptic feedback)"
+        elif val < 75:
+            return f"{val}% — Balanced (Comfortable impact response)"
+        elif val < 100:
+            return f"{val}% — Strong (High impact vibration)"
+        else:
+            return "100% — Full Force (Default game strength)"
+
+    def _on_rumble_change(self, *args):
+        val = int(self.rumble_var.get())
+        self.config.rumble_intensity = val
+        save_config(self.config)
+        if hasattr(self, "lbl_rumble_status") and self.lbl_rumble_status:
+            self.lbl_rumble_status.configure(text=self._get_rumble_status_text(val))
+
+    def _set_rumble_val(self, val: int):
+        self.rumble_var.set(val)
+        self._on_rumble_change()
+
+    def _on_test_rumble(self):
+        val = int(self.rumble_var.get())
+        if hasattr(self.controller, "test_rumble"):
+            self.controller.test_rumble(val)
 
     def _build_status_bar(self):
         bar = tk.Frame(self.root, bg="#0b1120", height=28, padx=12, pady=4)

@@ -45,6 +45,12 @@ class XINPUT_STATE(ctypes.Structure):
         ('Gamepad', XINPUT_GAMEPAD)
     ]
 
+class XINPUT_VIBRATION(ctypes.Structure):
+    _fields_ = [
+        ('wLeftMotorSpeed', wintypes.WORD),
+        ('wRightMotorSpeed', wintypes.WORD),
+    ]
+
 XINPUT_BUTTON_MASKS: Dict[str, int] = {
     "DPAD_UP":    0x0001,
     "DPAD_DOWN":  0x0002,
@@ -187,6 +193,8 @@ class ControllerIO:
                 self.xinput = ctypes.WinDLL(dll_name)
                 self.xinput.XInputGetState.argtypes = [wintypes.DWORD, ctypes.POINTER(XINPUT_STATE)]
                 self.xinput.XInputGetState.restype = wintypes.DWORD
+                self.xinput.XInputSetState.argtypes = [wintypes.DWORD, ctypes.POINTER(XINPUT_VIBRATION)]
+                self.xinput.XInputSetState.restype = wintypes.DWORD
                 break
             except Exception:
                 continue
@@ -194,6 +202,27 @@ class ControllerIO:
         # DirectInput fallback for non-XInput controllers
         self.dinput = DirectInputPad()
         self._dinput_idx: Optional[int] = None
+
+    def test_rumble(self, pct: Optional[int] = None, duration_s: float = 0.25) -> None:
+        """Sends a short haptic feedback pulse to the controller to preview rumble strength."""
+        if pct is None:
+            pct = getattr(self.config, "rumble_intensity", 100)
+
+        def _pulse():
+            try:
+                if not self.xinput:
+                    return
+                slot = self.controller_index if self.controller_backend == "xinput" else 0
+                spd = int(65535 * (max(0, min(100, int(pct))) / 100.0))
+                vib = XINPUT_VIBRATION(spd, spd)
+                self.xinput.XInputSetState(slot, ctypes.byref(vib))
+                time.sleep(duration_s)
+                vib_zero = XINPUT_VIBRATION(0, 0)
+                self.xinput.XInputSetState(slot, ctypes.byref(vib_zero))
+            except Exception:
+                pass
+
+        threading.Thread(target=_pulse, daemon=True).start()
 
     def _init_virtual_gamepad(self):
         """Creates the virtual Xbox 360 controller via ViGEmBus (opt-in only)."""
@@ -363,10 +392,13 @@ class ControllerIO:
             # 4. Stream to in-game hook (only override Player 1 when a pad is actually connected)
             try:
                 mute = 1 if self.config.mute_player2 else 0
+                rumble = int(getattr(self.config, "rumble_intensity", 100))
                 if found_controller:
-                    self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt, active=1, mute_p2=mute)
+                    self.hook.push_pad_state(out_lx, out_ly, out_rx, out_ry, out_buttons, out_lt, out_rt,
+                                             active=1, mute_p2=mute, rumble_pct=rumble)
                 else:
-                    self.hook.push_pad_state(0, 0, 0, 0, 0, 0, 0, active=0, mute_p2=mute)
+                    self.hook.push_pad_state(0, 0, 0, 0, 0, 0, 0,
+                                             active=0, mute_p2=mute, rumble_pct=rumble)
             except Exception:
                 pass
             # 5. Optional ViGEm path (disabled by default)

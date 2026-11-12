@@ -134,7 +134,7 @@ class MODULEENTRY32W(ctypes.Structure):
         ("szExePath",     ctypes.c_wchar * 260),
     ]
 
-# ── Shared control block layout (21 bytes) ───────────────────────────────────
+# ── Shared control block layout (22 bytes) ───────────────────────────────────
 # +0x00 DWORD magic         0x4B4E4952 ("RINK")
 # +0x04 DWORD active        1 = enabled, 0 = bypass
 # +0x08 SHORT lx            Transformed Left Stick X (-32767..32767)
@@ -145,11 +145,13 @@ class MODULEENTRY32W(ctypes.Structure):
 # +0x12 BYTE  bLeftTrigger  Remapped Left Trigger (0..255)
 # +0x13 BYTE  bRightTrigger Remapped Right Trigger (0..255)
 # +0x14 BYTE  mute_p2       1 = return ERROR_DEVICE_NOT_CONNECTED for edi!=0
-SHARED_BLOCK_FMT  = "<IIhhhhHBBB"
-SHARED_BLOCK_SIZE = struct.calcsize(SHARED_BLOCK_FMT)   # 21 bytes
+# +0x15 BYTE  rumble_pct    0..100 (percentage of game rumble to pass through)
+SHARED_BLOCK_FMT  = "<IIhhhhHBBBB"
+SHARED_BLOCK_SIZE = struct.calcsize(SHARED_BLOCK_FMT)   # 22 bytes
 MAGIC             = 0x4B4E4952
 
 HOOK_SITE_SIZE = 24
+SET_STATE_HOOK_SIZE = 17
 
 # Unique instruction signature at the write site inside InputSystem::GetState:
 # mov [rcx], ebp; mov edx, [rsp+0x2c]; mov [rcx+4], dx; mov [rcx+6], r13b; mov [rcx+7], bl
@@ -161,61 +163,89 @@ WRITE_SITE_SIG = bytes([
     0x88, 0x59, 0x07                    # mov [rcx+0x07], bl
 ])
 
+# Unique instruction signature at XamInputSetState_entry:
+# push r14; push rsi; push rdi; push rbp; push rbx; sub rsp, 0x20; mov rsi, [r8]; test rsi, rsi; jz
+SET_STATE_SIG = bytes([
+    0x41, 0x56,                         # push r14
+    0x56,                               # push rsi
+    0x57,                               # push rdi
+    0x55,                               # push rbp
+    0x53,                               # push rbx
+    0x48, 0x83, 0xEC, 0x20,             # sub rsp, 0x20
+    0x49, 0x8B, 0x30,                   # mov rsi, [r8]
+    0x48, 0x85, 0xF6,                   # test rsi, rsi
+    0x74                                # jz ...
+])
+
 # Fallback offsets for current RinkSide build (Nov 10+ 2026 update)
 DEFAULT_WRITE_RVA = 0x368e80
 DEFAULT_RESUME_RVA = 0x368e9d
+DEFAULT_SET_STATE_RVA = 0x57d400
 
-_OFFSETS_CACHE: dict[str, Tuple[int, int]] = {}
+_OFFSETS_CACHE: dict[str, Tuple[int, int, int]] = {}
 
 
-def resolve_rex_offsets(dll_path: str) -> Optional[Tuple[int, int]]:
+def resolve_rex_offsets(dll_path: str) -> Tuple[int, int, int]:
     """
-    Dynamically discovers the write site and resume site RVAs from rexruntime.dll.
+    Dynamically discovers the write site, resume site, and SetState RVAs from rexruntime.dll.
     Ensures compatibility across game and runtime updates.
     """
     if not dll_path or not os.path.exists(dll_path):
-        return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+        return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA, DEFAULT_SET_STATE_RVA
     if dll_path in _OFFSETS_CACHE:
         return _OFFSETS_CACHE[dll_path]
+
+    write_rva = DEFAULT_WRITE_RVA
+    resume_rva = DEFAULT_RESUME_RVA
+    set_state_rva = DEFAULT_SET_STATE_RVA
+
     try:
+        with open(dll_path, 'rb') as f:
+            dll_bytes = f.read()
+
+        pos_set = dll_bytes.find(SET_STATE_SIG)
+        if pos_set != -1:
+            set_state_rva = pos_set + 0xC00
+
         h = kernel32.LoadLibraryExW(dll_path, None, DONT_RESOLVE_DLL_REFERENCES)
-        if not h:
-            return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
-        try:
-            sym = b"?GetState@InputSystem@input@rex@@QEAAIIPEAUX_INPUT_STATE@23@@Z"
-            fn = kernel32.GetProcAddress(h, sym)
-            if not fn:
-                return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
-            func_rva = fn - h
-            buf = (ctypes.c_ubyte * 0x300).from_address(fn)
-            func_bytes = bytes(buf)
-            pos = func_bytes.find(WRITE_SITE_SIG)
-            if pos != -1:
-                write_rva = func_rva + pos
-                resume_rva = write_rva + 29
-                _OFFSETS_CACHE[dll_path] = (write_rva, resume_rva)
-                return write_rva, resume_rva
-        finally:
-            kernel32.FreeLibrary(h)
+        if h:
+            try:
+                sym = b"?GetState@InputSystem@input@rex@@QEAAIIPEAUX_INPUT_STATE@23@@Z"
+                fn = kernel32.GetProcAddress(h, sym)
+                if fn:
+                    func_rva = fn - h
+                    buf = (ctypes.c_ubyte * 0x300).from_address(fn)
+                    func_bytes = bytes(buf)
+                    pos = func_bytes.find(WRITE_SITE_SIG)
+                    if pos != -1:
+                        write_rva = func_rva + pos
+                        resume_rva = write_rva + 29
+            finally:
+                kernel32.FreeLibrary(h)
     except Exception:
         pass
-    return DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+
+    _OFFSETS_CACHE[dll_path] = (write_rva, resume_rva, set_state_rva)
+    return write_rva, resume_rva, set_state_rva
 
 
 class GameHook:
     def __init__(self):
-        self.hooked:             bool          = False
-        self.pid:                Optional[int] = None
-        self.hProcess:           Optional[int] = None
-        self.rexruntime_base:    int           = 0
-        self.rexruntime_path:    str           = ""
-        self.allocated_page:     int           = 0
-        self.shared_block_addr:  int           = 0
-        self.hook_code_addr:     int           = 0
-        self.target_write_va:    int           = 0
-        self.target_resume_va:   int           = 0
-        self.orig_site_bytes:    bytes         = b""
-        self.status_message:     str           = "Waiting for nhllegacy.exe..."
+        self.hooked:               bool          = False
+        self.pid:                  Optional[int] = None
+        self.hProcess:             Optional[int] = None
+        self.rexruntime_base:      int           = 0
+        self.rexruntime_path:      str           = ""
+        self.allocated_page:       int           = 0
+        self.shared_block_addr:    int           = 0
+        self.hook_code_addr:       int           = 0
+        self.vibe_hook_code_addr:  int           = 0
+        self.target_write_va:      int           = 0
+        self.target_resume_va:     int           = 0
+        self.target_set_state_va:  int           = 0
+        self.orig_site_bytes:      bytes         = b""
+        self.orig_set_state_bytes: bytes         = b""
+        self.status_message:       str           = "Waiting for nhllegacy.exe..."
 
     def is_process_alive(self) -> bool:
         """Checks if the hooked game process is still actively running."""
@@ -387,6 +417,73 @@ class GameHook:
 
         return bytes(b)
 
+    def _build_vibe_assembly(self, shared_addr: int, resume_addr: int, null_exit_addr: int) -> bytes:
+        """
+        Constructs the x64 assembly executed when XamInputSetState_entry is called.
+        Dynamically scales wLeftMotorSpeed and wRightMotorSpeed based on rumble_pct,
+        or completely mutes rumble if rumble_pct == 0 or mute_p2 is active for P2+.
+        """
+        b = bytearray()
+        # 1. Overwritten prologue
+        b += bytes([0x41, 0x56, 0x56, 0x57, 0x55, 0x53, 0x48, 0x83, 0xEC, 0x20, 0x49, 0x8B, 0x30, 0x48, 0x85, 0xF6])
+        off_jnz_not_null = len(b); b += bytes([0x75, 0x00])
+
+        # exit_null:
+        b += bytes([0x49, 0xBB]) + struct.pack('<Q', null_exit_addr) + bytes([0x41, 0xFF, 0xE3])
+
+        # not_null:
+        pos_not_null = len(b)
+        b += bytes([0x49, 0xBA]) + struct.pack('<Q', shared_addr)
+        b += bytes([0x41, 0x81, 0x3A, 0x52, 0x49, 0x4E, 0x4B])
+        off_jnz_magic = len(b); b += bytes([0x75, 0x00])
+        b += bytes([0x41, 0x83, 0x7A, 0x04, 0x00])
+        off_jz_active = len(b); b += bytes([0x74, 0x00])
+
+        # Check mute_player2 if ecx != 0
+        b += bytes([0x85, 0xC9])
+        off_jz_p1 = len(b); b += bytes([0x74, 0x00])
+        b += bytes([0x41, 0x80, 0x7A, 0x14, 0x00])
+        off_jz_mute_p2 = len(b); b += bytes([0x74, 0x00])
+        # Mute Player 2: zero out motors and return ERROR_DEVICE_NOT_CONNECTED (0x48F)
+        b += bytes([0xC7, 0x06, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xC4, 0x20, 0x5B, 0x5D, 0x5F, 0x5E, 0x41, 0x5E, 0xB8, 0x8F, 0x04, 0x00, 0x00, 0xC3])
+
+        # check_rumble:
+        pos_check_rumble = len(b)
+        b += bytes([0x41, 0x0F, 0xB6, 0x42, 0x15, 0x83, 0xF8, 0x64])
+        off_jge_100 = len(b); b += bytes([0x7D, 0x00])
+        b += bytes([0x85, 0xC0])
+        off_jnz_scale = len(b); b += bytes([0x75, 0x00])
+
+        # 0% silent:
+        b += bytes([0xC7, 0x06, 0x00, 0x00, 0x00, 0x00])
+        off_jmp_silent = len(b); b += bytes([0xEB, 0x00])
+
+        # scale_both:
+        pos_scale = len(b)
+        # Left motor (WORD at [rsi], big-endian)
+        b += bytes([0x0F, 0xB7, 0x16, 0x86, 0xF2, 0x0F, 0xAF, 0xD0, 0x50, 0x89, 0xD0, 0x31, 0xD2, 0x41, 0xBB, 0x64, 0x00, 0x00, 0x00, 0x41, 0xF7, 0xF3, 0x86, 0xE0, 0x66, 0x89, 0x06, 0x58])
+        # Right motor (WORD at [rsi+2], big-endian)
+        b += bytes([0x0F, 0xB7, 0x56, 0x02, 0x86, 0xF2, 0x0F, 0xAF, 0xD0, 0x50, 0x89, 0xD0, 0x31, 0xD2, 0x41, 0xF7, 0xF3, 0x86, 0xE0, 0x66, 0x89, 0x46, 0x02, 0x58])
+
+        # resume_normal:
+        pos_resume = len(b)
+        b += bytes([0x49, 0xBB]) + struct.pack('<Q', resume_addr) + bytes([0x41, 0xFF, 0xE3])
+
+        jumps = [
+            (off_jnz_not_null, pos_not_null),
+            (off_jnz_magic, pos_resume),
+            (off_jz_active, pos_resume),
+            (off_jz_p1, pos_check_rumble),
+            (off_jz_mute_p2, pos_check_rumble),
+            (off_jge_100, pos_resume),
+            (off_jnz_scale, pos_scale),
+            (off_jmp_silent, pos_resume),
+        ]
+        for off, target in jumps:
+            diff = target - (off + 2)
+            b[off + 1] = diff & 0xFF
+        return bytes(b)
+
     def attach(self) -> bool:
         """Finds nhllegacy.exe, allocates an RWX page, and safely patches InputSystem::GetState."""
         pid = self.find_nhllegacy_pid()
@@ -425,12 +522,13 @@ class GameHook:
         # ── Dynamically resolve write site RVAs ───────────────────────────────
         offsets = resolve_rex_offsets(rex_path)
         if offsets:
-            write_rva, resume_rva = offsets
+            write_rva, resume_rva, set_state_rva = offsets
         else:
-            write_rva, resume_rva = DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA
+            write_rva, resume_rva, set_state_rva = DEFAULT_WRITE_RVA, DEFAULT_RESUME_RVA, DEFAULT_SET_STATE_RVA
 
         self.target_write_va = rex_base + write_rva
         self.target_resume_va = rex_base + resume_rva
+        self.target_set_state_va = rex_base + set_state_rva
 
         # ── Read and verify current bytes at target location ──────────────────
         current_bytes = (ctypes.c_ubyte * HOOK_SITE_SIZE)()
@@ -472,8 +570,8 @@ class GameHook:
 
         written = ctypes.c_size_t(0)
 
-        # 1. Write initial shared block (active=1, mute_p2=0)
-        initial_block = struct.pack(SHARED_BLOCK_FMT, MAGIC, 1, 0, 0, 0, 0, 0, 0, 0, 0)
+        # 1. Write initial shared block (active=1, mute_p2=0, rumble_pct=100)
+        initial_block = struct.pack(SHARED_BLOCK_FMT, MAGIC, 1, 0, 0, 0, 0, 0, 0, 0, 0, 100)
         kernel32.WriteProcessMemory(hProcess, self.shared_block_addr,
                                     initial_block, len(initial_block),
                                     ctypes.byref(written))
@@ -502,13 +600,46 @@ class GameHook:
         kernel32.VirtualProtectEx(hProcess, self.target_write_va, HOOK_SITE_SIZE,
                                   old_prot, ctypes.byref(old_prot))
 
+        # 4. Optionally patch XamInputSetState_entry to scale rumble & mute P2 vibration
+        try:
+            current_vibe = (ctypes.c_ubyte * SET_STATE_HOOK_SIZE)()
+            if kernel32.ReadProcessMemory(hProcess, self.target_set_state_va,
+                                          current_vibe, SET_STATE_HOOK_SIZE,
+                                          ctypes.byref(read_sz)):
+                vibe_data = bytes(current_vibe)
+                if vibe_data.startswith(SET_STATE_SIG[:10]):
+                    self.orig_set_state_bytes = vibe_data
+                    self.vibe_hook_code_addr = page + 0x160
+                    resume_set_state_va = self.target_set_state_va + SET_STATE_HOOK_SIZE
+                    null_exit_va = self.target_set_state_va + 0x8E
+                    vibe_asm = self._build_vibe_assembly(self.shared_block_addr,
+                                                         resume_set_state_va,
+                                                         null_exit_va)
+                    kernel32.WriteProcessMemory(hProcess, self.vibe_hook_code_addr,
+                                                vibe_asm, len(vibe_asm),
+                                                ctypes.byref(written))
+                    vibe_patch = bytearray([0xFF, 0x25, 0x00, 0x00, 0x00, 0x00])
+                    vibe_patch += struct.pack("<Q", self.vibe_hook_code_addr)
+                    vibe_patch += bytes([0x90] * (SET_STATE_HOOK_SIZE - len(vibe_patch)))
+                    kernel32.VirtualProtectEx(hProcess, self.target_set_state_va, SET_STATE_HOOK_SIZE,
+                                              PAGE_EXECUTE_READWRITE, ctypes.byref(old_prot))
+                    kernel32.WriteProcessMemory(hProcess, self.target_set_state_va,
+                                                bytes(vibe_patch), SET_STATE_HOOK_SIZE,
+                                                ctypes.byref(written))
+                    kernel32.VirtualProtectEx(hProcess, self.target_set_state_va, SET_STATE_HOOK_SIZE,
+                                              old_prot, ctypes.byref(old_prot))
+                    print(f"[RinkStick Hook] Successfully attached rumble scaler at 0x{self.target_set_state_va:X}")
+        except Exception as e:
+            print(f"[RinkStick Hook] Vibration hook skipped: {e}")
+
         self.hooked = True
         self.status_message = f"🟢 ATTACHED & ACTIVE (NHL Legacy PID: {pid})"
         print(f"[RinkStick Hook] Successfully attached to NHL Legacy (PID {pid}) at 0x{self.target_write_va:X}!")
         return True
 
     def update_state(self, lx: int, ly: int, rx: int, ry: int,
-                     buttons: int, lt: int, rt: int, active: int = 1, mute_p2: int = 0) -> None:
+                     buttons: int, lt: int, rt: int, active: int = 1,
+                     mute_p2: int = 0, rumble_pct: int = 100) -> None:
         """Writes transformed stick + remapped button/trigger data into shared control block."""
         if not self.hooked or not self.hProcess:
             return
@@ -519,6 +650,7 @@ class GameHook:
             int(buttons) & 0xFFFF,
             int(lt) & 0xFF, int(rt) & 0xFF,
             int(mute_p2) & 0xFF,
+            int(rumble_pct) & 0xFF,
         )
         written = ctypes.c_size_t(0)
         kernel32.WriteProcessMemory(self.hProcess,
@@ -545,6 +677,18 @@ class GameHook:
             kernel32.VirtualProtectEx(self.hProcess, self.target_write_va,
                                       HOOK_SITE_SIZE, old_prot,
                                       ctypes.byref(old_prot))
+
+        if self.target_set_state_va and self.orig_set_state_bytes:
+            kernel32.VirtualProtectEx(self.hProcess, self.target_set_state_va,
+                                      SET_STATE_HOOK_SIZE, PAGE_EXECUTE_READWRITE,
+                                      ctypes.byref(old_prot))
+            kernel32.WriteProcessMemory(self.hProcess, self.target_set_state_va,
+                                        self.orig_set_state_bytes, SET_STATE_HOOK_SIZE,
+                                        ctypes.byref(written))
+            kernel32.VirtualProtectEx(self.hProcess, self.target_set_state_va,
+                                      SET_STATE_HOOK_SIZE, old_prot,
+                                      ctypes.byref(old_prot))
+            self.orig_set_state_bytes = b""
 
         if self.allocated_page:
             kernel32.VirtualFreeEx(self.hProcess, self.allocated_page, 0, MEM_RELEASE)
@@ -586,10 +730,12 @@ class GameInputBridge:
             return False
 
     def push_pad_state(self, lx: int, ly: int, rx: int, ry: int,
-                       buttons: int, lt: int, rt: int, active: int = 1, mute_p2: int = 0) -> None:
+                       buttons: int, lt: int, rt: int, active: int = 1,
+                       mute_p2: int = 0, rumble_pct: int = 100) -> None:
         if self.hooked:
             try:
-                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt, active=active, mute_p2=mute_p2)
+                self._hook.update_state(lx, ly, rx, ry, buttons, lt, rt,
+                                        active=active, mute_p2=mute_p2, rumble_pct=rumble_pct)
             except Exception:
                 pass
 
